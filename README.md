@@ -3,6 +3,9 @@ Ansible Manager - Run playbooks and manage local runtime
 
 AnsMan sets out to make running playbooks simpler. Rather than manually write overly long Ansible commands, simply run ansman.
 
+## Installation
+Copy/symlink ansman to somewhere in your path.
+
 ## Features
 - Run project from anywhere. Ansman can save a list of known projects.
 - Easily install ansible and dependencies. 
