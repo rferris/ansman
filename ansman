@@ -1,0 +1,587 @@
+#!/usr/bin/env bash
+# 2024 The University of Queensland Library         
+# vim: tabstop=4 shiftwidth=4 expandtab autoindent
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+RUNDIR=$DIR
+VERSION=1.0
+ANSIBLE=$(which ansible)
+VAULT_FILE="$RUNDIR/.vaultpw"
+CONFDIR=""
+CONFFILE=""
+HISTFILE="$RUNDIR/.run_history"
+CONFIG=""
+PROJECT=""
+
+###############################################################################
+# Config
+###############################################################################
+
+function set_config_home() {
+    if [ -n $XDG_CONFIG_HOME ] && [ $(echo "$XDG_CONFIG_HOME" | grep -c '/') -ge 1 ];
+    then
+        CONFDIR="$XDG_CONFIG_HOME/ansman"
+    else
+        CONFDIR="$HOME/.config/ansman"
+    fi
+    mkdir -p "$CONFDIR"
+    CONFFILE="$CONFDIR/config"
+}
+
+function edit_config() {
+    if [ -z "$EDITOR" ];
+    then
+        EDITOR="vim"
+    fi
+    $EDITOR $CONFFILE
+    choose_task
+}
+
+function save_config() {
+    echo "$CONFIG" | jq > $CONFFILE
+    echo "Config updated."
+}
+
+function read_config() {
+    if [ -f $CONFFILE ];
+    then
+        CONFIG=$(cat $CONFFILE)
+    else
+        CONFIG='{ "projects": [] }'
+        save_config
+        echo "Created new config file: $CONFFILE"
+    fi
+}
+
+function add_project() {
+    if [ $(grep -c "$PWD" $CONFFILE) -ne 1 ];
+    then
+        get_yn "Add current directory to AnsMan config?"
+        DOADD=$?
+        if [ $DOADD -eq 0 ]; then
+            read -r -p "Project name: " PROJECT
+            CONFIG=$(jq -r --arg PROJECT "$PROJECT" --arg PWD "$PWD" '.projects[.projects | length] |= . + {
+            "name": $PROJECT,
+            "path": $PWD
+            }' $CONFFILE)
+            save_config 
+        fi
+    else
+        echo "Current directory already in config file."
+    fi
+    sleep 2
+    choose_task
+}
+
+function choose_project() {
+    if [ $(grep -c "$PWD" $CONFFILE) -ne 1 ];
+    then
+        CONFPROJECTS=$(jq -r '.projects[]| "\(.name) \(.path)"' $CONFFILE)
+        if [ -z "$CONFPROJECTS" ];
+        then
+            echo "No projects configured. Consider adding one."
+            return
+        fi
+        echo "Already configured projects:"
+        ANS=$(printf '%s\n' "${CONFPROJECTS[@]}"| nl -ba |fzf --height=10  --bind enter:accept-non-empty --color --prompt="Choose Project: ")
+        PROJECT=$(echo $ANS | awk '{print $2}')
+        RUNDIR=$(echo $ANS | awk '{print $3}')
+    else
+        PROJECT="Current directory"
+        RUNDIR="$PWD"
+    fi
+    HISTFILE="$RUNDIR/.run_history"
+    VAULT_FILE="$RUNDIR/.vaultpw"
+}
+
+###############################################################################
+# Banner
+###############################################################################
+
+function welcome() {
+    echo '
+    ___               __  ___
+   /   |  ____  _____/  |/  /___ _____
+  / /| | / __ \/ ___/ /|_/ / __ `/ __ \
+ / ___ |/ / / (__  ) /  / / /_/ / / / /
+/_/  |_/_/ /_/____/_/  /_/\__,_/_/ /_/
+'
+    echo "Welcome AnsMan version $VERSION."
+    echo "Working in $RUNDIR."
+    echo
+}
+
+###############################################################################
+# Dependencies
+###############################################################################
+
+function which_pkger() {
+    if command -v apt 1>/dev/null; then
+        echo 'sudo apt install'
+    elif command -v yum 1>/dev/null; then
+        echo 'sudo yum install'
+    elif command -v pacman 1>/dev/null; then
+        echo 'sudo pacman -Sy'
+    else
+        echo "Could not find a way to install packages. Giving up."
+        exit 1
+    fi
+}
+PKGCMD=$(which_pkger)
+
+function install_pipx() {
+
+    if ! command -v pipx 1>/dev/null; then
+        echo "Pipx is a handy way to install python apps."
+        get_yn "Install pipx? (ubuntu and fedora only)"
+        INPIPX=$?
+        if [ $INPIPX -eq 0 ]; then
+            echo "Installing pipx"
+            $PKGCMD pipx
+        fi
+    else
+        echo 'pipx already installed.'
+    fi
+}
+
+function install_jq() {
+    if ! command -v jq 1>/dev/null;
+    then
+        echo "Installing jq"
+        PKGCMD=$(which_pkger)
+        $PKGCMD jq
+    else
+        echo "jq already installed."
+    fi
+}
+
+function install_fzf() {
+    if ! command -v fzf 1>/dev/null;
+    then
+        echo "Installing fzf"
+        PKGCMD=$(which_pkger)
+        $PKGCMD fzf
+    else
+        echo "fzf already installed."
+    fi
+}
+
+function install_pkg() {
+    if ! command -v $1 1>/dev/null;
+    then
+        echo "Installing $1"
+        $PKGCMD $1
+    else
+        echo "$1 already installed."
+    fi
+}
+
+
+function install_ansible() {
+    echo "Installing Ansible using pipx."
+    install_pkg pipx
+    install_pkg jq
+    install_pkg fzf
+    get_yn "Install Ansible from pipx?"
+    INAN=$?
+    if [ $INAN -eq 0 ]; then
+        pipx install ansible-core
+        # We need the dnspython library to be in the ansible venv
+        pipx inject ansible-core dnspython
+    fi
+}
+
+function install_deps() {
+    echo "Installing collections from Ansible Galaxy"
+    ansible-galaxy collection install --pre -r collections/requirements.yml
+}
+
+function install_ansible_and_deps() {
+    echo "Installing dependencies."
+    install_ansible
+    install_deps
+}
+
+
+
+###############################################################################
+# fzf
+###############################################################################
+
+function fzf_height() {
+    if [ $# -lt 20 ];
+    then
+        length=$#
+    else
+        length=20
+    fi
+    echo $(($length + 2))
+}
+
+function show_fzf() {
+    height=$(fzf_height "${@}")
+    ANS=$(printf '%s\n' "${@}"| nl -ba |fzf --height=$height  --bind enter:accept-non-empty --color --prompt="${FZF_PROMPT}")
+    echo $ANS
+}
+
+
+###############################################################################
+# Menu
+###############################################################################
+
+function choose_task() {
+    welcome
+    if ! command -v ansible-galaxy 1>/dev/null; then
+        echo "$(tput setaf 1)Ansible does not appear to be installed. Please choose option 2 first.$(tput sgr 0)"
+    fi
+    FZF_PROMPT='Choose a task: '
+    options=("Run" "Install Ansible" "Update galaxy dependencies" "Setup Vault" "History" "Edit Config" "Add Project" "Quit")
+
+    # Remove digit from front of fzf output
+    opt=$(show_fzf "${options[@]}" | sed -e 's/[0-9] //g')
+    case $opt in
+        "Run")
+            run_playbook    
+            ;;
+        "Install Ansible")
+            install_ansible_and_deps
+            ;;
+        "Update galaxy dependencies")
+            install_deps
+            ;;
+        "Setup Vault")
+            setup_vault
+            ;;
+        "History")
+            show_history
+            ;;
+        "Edit Config")
+            edit_config
+            ;;
+        "Add Project")
+            add_project
+            ;;
+        "Quit")
+            exit
+            ;;
+        *)
+            echo "invalid option $REPLY";;
+
+    esac
+    #done
+}
+
+###############################################################################
+# Vault
+###############################################################################
+
+function save_vault_pw() {
+    echo "Enter vault password. This will be saved to $VAULT_FILE."
+    unset password;
+    stty -echo
+    read password;
+    stty echo
+    #cat <<< "$password" > $VAULT_FILE
+    echo "$password" > $VAULT_FILE
+}
+
+function setup_vault() {
+    if [ -f $VAULT_FILE ]; then
+        echo ""
+        echo "Exiting. $VAULT_FILE already exists."
+    else
+        echo 'Vault password can be found at https://ps.its.uq.edu.au/pid=15644'
+        save_vault_pw
+    fi
+}
+
+###############################################################################
+# Inventory
+###############################################################################
+
+# Get groups and pick one.
+function choose_group() {
+    GROUPJSON=$(ansible -i $1 localhost -m debug -a 'var=groups'| sed -e '/SUCCESS/c\\{')
+    
+    GROUPLIST=$(printf "$GROUPJSON"| jq -r '.[]| keys[] as $k| "\($k)"')
+    WORDS=$(echo "$GROUPLIST" |wc -w)
+    height=$(($WORDS + 2))
+    printf '%s\n' "${GROUPLIST}"| fzf --preview "ansible -i $1 --list-hosts {}" --height=$height  --bind enter:accept-non-empty --color 
+
+}
+
+function run_playbook() {
+    echo
+    # Get inventory files and turn them into an array
+    INVENTORIES=($(ls $RUNDIR/inventory/*.yml | awk -F/ '{print $NF}'))
+
+    get_inventory $INVENTORIES
+    INVENTORY="$RUNDIR/inventory/${INVENTORIES[$?]}"
+    echo
+
+    INV_GROUP=$(choose_group $INVENTORY)
+
+    echo "Selected group: $INV_GROUP:"
+    # tput is a good way of getting easy coloured terminal output.
+    echo "$(tput setaf 2)$($ANSIBLE -i $INVENTORY --list-hosts $INV_GROUP)$(tput sgr 0)"
+    echo
+
+    # Choose playbook
+    PLAYBOOKS=$(ls $RUNDIR/*.yml | awk -F/ '{print $NF}')
+    
+    WORDS=$(echo "$PLAYBOOKS" |wc -w)
+    height=$(($WORDS + 20))
+    PLAYBOOK=$(printf '%s\n' $PLAYBOOKS| fzf --preview "bat --color=always {}" --height=$height  --bind enter:accept-non-empty --color)
+    echo "Selected playbook: $PLAYBOOK."
+    echo
+    # Ask whether to run in check mode
+    echo "Check (dry-run) mode enabled by default."
+    get_yn "Do you wish to allow changes to target systems?"
+    USECHECK=$?
+    echo
+
+    #PLAYBOOK='site.yml'
+    ANSIBLE_COMMAND="ansible-playbook -K -i $INVENTORY $PLAYBOOK --limit $INV_GROUP"
+
+    if [ -f "$VAULT_FILE" ]; then
+        ANSIBLE_COMMAND="$ANSIBLE_COMMAND --vault-password-file $VAULT_FILE"
+    else
+        ANSIBLE_COMMAND="$ANSIBLE_COMMAND --ask-vault-pass"
+    fi
+
+    if [ $USECHECK -eq 1 ]; then
+        echo "$(tput setaf 3)Ansible is running in check mode, no changes will be made.$(tput sgr 0)"
+        ANSIBLE_NOCHECK="${ANSIBLE_COMMAND}"
+        ANSIBLE_COMMAND="${ANSIBLE_COMMAND} --check"
+    fi
+
+    echo
+    echo "The following will execute: $(tput setaf 2)$ANSIBLE_COMMAND$(tput sgr 0)"
+    explain_command "$ANSIBLE_COMMAND"
+    confirm
+    CONFIRMED=$?
+
+    if [ $CONFIRMED -eq 0 ]; then
+        echo "---------------------------"
+        echo
+        echo "$ANSIBLE_COMMAND" >> "$HISTFILE"
+        $ANSIBLE_COMMAND
+
+        if [ $USECHECK -eq 1 ]; then
+            get_yn "Re-run this playbook and apply suggested changes?"
+            RERUN=$?
+            if [ $RERUN -eq 0 ]; then
+                echo "$ANSIBLE_NOCHECK" >> "$HISTFILE"
+                $ANSIBLE_NOCHECK
+            fi
+        fi
+    else
+        echo
+        echo "Execution cancelled."
+        exit 1
+    fi
+}
+
+function get_inventory() {
+    INVENTORIES=$@
+    WITH_QUIT=()
+    for (( i=0; i <= ${#INVENTORIES[@]}; i++ ))
+    do
+        WITH_QUIT+=(${INVENTORIES[$i]})
+    done
+    WITH_QUIT+=('Quit')
+
+    FZF_PROMPT="Select inventory: "
+    opt=$(show_fzf "${WITH_QUIT[@]}")
+    optval=$(echo "$opt" | sed -e 's/[0-9] //g')
+    ind=$(echo "$opt" | awk '{print $1}')
+    opt_index=$(($ind - 1))
+
+    contains_element $optval "${INVENTORIES[@]}"
+    result=$?
+    if [ $result -eq 0 ]; then
+        return $opt_index
+    elif [ $optval == 'Quit' ]; then
+        echo "Bye!"
+        exit
+    else
+        echo "Invalid option $opt. Select another option or press Control-c to quit." >&2
+        exit
+    fi
+
+}
+
+function get_playbook() {
+    PLAYBOOKS=$1
+    PS3='Select playbooks: '
+    select opt in "${PLAYBOOKS[@]}"
+    do
+        contains_element $opt "${PLAYBOOKS[@]}"
+        result=$?
+        if [ $result -eq 0 ]; then
+            return $(($REPLY-1))
+            break
+        elif [ $REPLY == 'q' ]; then
+            break
+        else
+            echo "invalid option $REPLY. Select another option or press q to quit."
+        fi
+    done
+
+}
+
+###############################################################################
+# Helper
+###############################################################################
+
+function get_yn() {
+    read -r -p "$1 [y/N] " response
+    case "$response" in
+        [yY][eE][sS]|[yY])
+            return 0
+            break
+            ;;
+        [nN][oO]|[nN])
+            return 1
+            break
+            ;;
+        *)
+            echo "invalid option $REPLY"
+            get_yn
+            return $?
+            ;;
+    esac
+}
+
+function confirm() {
+    read -r -p "Proceed? [y/N] " response
+    case "$response" in
+        [yY][eE][sS]|[yY])
+            return 0
+            break
+            ;;
+        [nN][oO]|[nN])
+            return 1
+            break
+            ;;
+        *)
+            echo "Invalid option $REPLY"
+            use_check
+            return $?
+            ;;
+    esac
+
+}
+
+revarray=()
+function reverse_array() {
+    f() { revarray=("${BASH_ARGV[@]}"); }
+    shopt -s extdebug
+    f "${@}"
+    shopt -u extdebug
+}
+
+function is_check() {
+    IS_CHECK=$(echo "${@}" | grep -c check)
+    if [ $IS_CHECK -ge 1 ];
+    then
+        return 1
+    else
+        return 0
+    fi
+}
+
+function explain_command() {
+    if is_check "$@";
+    then
+        CHECK="No"
+    else
+        CHECK="Yes"
+    fi
+    echo "${@}" | awk '{sub(/inventory\//,"",$4)}; {print "Inventory: " $4   "\nPlaybook: " $5 "\nLimit: " $7}'
+    echo "Check (Dry run): $CHECK"
+}
+
+function contains_element () {
+    local e match="$1"
+    shift
+    for e; do [[ "$e" == "$match" ]] && return 0; done
+    return 1
+}
+
+###############################################################################
+# History
+###############################################################################
+
+function show_history() {
+    FZF_PROMPT='Rerun job: '
+    readarray -t HISTORY < $HISTFILE
+    reverse_array "${HISTORY[@]}"
+    CHOICE=$(show_fzf  "${revarray[@]}" | sed -e 's/[0-9] //g')
+    echo "Will run: $CHOICE"
+    IS_CHECK=$(echo $CHOICE | grep -c check)
+    if [ $IS_CHECK -ge 1 ];
+    then
+        get_yn "Run in check mode?"
+        DO_CHECK=$?
+        if [ $DO_CHECK -ne 0 ];
+        then
+            CHOICE=$(echo $CHOICE | sed -e 's/--check//g')
+            echo "Command changed to:"
+            echo ${CHOICE}
+        fi
+    fi
+    INV=
+    echo
+    explain_command "$CHOICE"
+    $CHOICE
+}
+
+###############################################################################
+# Start
+###############################################################################
+
+if ! command -v fzf &> /dev/null
+then
+    echo "Could not find fzf. Attempting to install"
+    install_pkg fzf
+fi
+
+if ! command -v bat &> /dev/null
+then
+    echo "Could not find bat. Attempting to install"
+    install_pkg bat
+fi
+
+function startup() {
+    set_config_home
+    read_config
+    choose_project
+}
+
+startup
+cd $RUNDIR
+if [[ $# -eq 0 ]] ; then
+    choose_task
+else
+    case $1 in
+        "last")
+            if [ -f "$HISTFILE" ]; then
+               last_cmd=$(tail -1 "$HISTFILE")
+               echo "$last_cmd"
+                $last_cmd
+            else
+                echo "No history file yet."
+            fi
+            ;;
+        "history")
+            if [ -f "$HISTFILE" ]; then
+                show_history
+            else
+                echo "No history file yet."
+            fi
+            ;;
+        *)
+            echo "Invalid argument: $1"
+            ;;
+    esac
+fi
