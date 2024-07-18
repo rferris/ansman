@@ -23,4 +23,4 @@ I would like to improve this in future when time permits.
 - pipx - for installing Ansible
 
 ## Misc
-This is was written quickly to suit my needs, so it definitely isn't perfect. Use at your own peril. PRs accepted.
+This is was written quickly to suit my needs, so it definitely isn't perfect. Bash is not my favourite language, nor my strong suit. PRs accepted.
