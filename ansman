@@ -2,7 +2,8 @@
 # 2024 The University of Queensland Library         
 # vim: tabstop=4 shiftwidth=4 expandtab autoindent
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-RUNDIR=$DIR
+BINDIR="${DIR}"
+RUNDIR="${DIR}"
 VERSION=1.0
 ANSIBLE=$(which ansible)
 VAULT_FILE="$RUNDIR/.vaultpw"
@@ -11,6 +12,7 @@ CONFFILE=""
 HISTFILE="$RUNDIR/.run_history"
 CONFIG=""
 PROJECT=""
+REQUIREMENTS_FILE=""
 
 ###############################################################################
 # Config
@@ -24,7 +26,7 @@ function set_config_home() {
         CONFDIR="$HOME/.config/ansman"
     fi
     mkdir -p "$CONFDIR"
-    CONFFILE="$CONFDIR/config"
+    CONFFILE="$CONFDIR/config.json"
 }
 
 function edit_config() {
@@ -42,7 +44,7 @@ function save_config() {
 }
 
 function read_config() {
-    if [ -f $CONFFILE ];
+    if [ -s $CONFFILE ];
     then
         CONFIG=$(cat $CONFFILE)
     else
@@ -59,6 +61,7 @@ function add_project() {
         DOADD=$?
         if [ $DOADD -eq 0 ]; then
             read -r -p "Project name: " PROJECT
+            PROJECT="$(echo ${PROJECT}| sed -e 's/ /_/g')" 
             CONFIG=$(jq -r --arg PROJECT "$PROJECT" --arg PWD "$PWD" '.projects[.projects | length] |= . + {
             "name": $PROJECT,
             "path": $PWD
@@ -76,15 +79,22 @@ function choose_project() {
     if [ $(grep -c "$PWD" $CONFFILE) -ne 1 ];
     then
         CONFPROJECTS=$(jq -r '.projects[]| "\(.name) \(.path)"' $CONFFILE)
-        if [ -z "$CONFPROJECTS" ];
+        #if [ -z "$CONFPROJECTS" ];
+        #then
+        #    echo "No projects configured. Consider adding one."
+        #    return
+        #fi
+        echo "Choose project:"
+        ANS=$(printf 'New\n%s\n' "${CONFPROJECTS[@]}"| nl -ba |fzf --height=10  --bind enter:accept-non-empty --color --prompt="Choose Project: ")
+        if echo $ANS | grep "New"
         then
-            echo "No projects configured. Consider adding one."
-            return
+            add_project
+            choose_project
         fi
-        echo "Already configured projects:"
-        ANS=$(printf '%s\n' "${CONFPROJECTS[@]}"| nl -ba |fzf --height=10  --bind enter:accept-non-empty --color --prompt="Choose Project: ")
         PROJECT=$(echo $ANS | awk '{print $2}')
-        RUNDIR=$(echo $ANS | awk '{print $3}')
+        RUNDIR=$(echo $ANS | awk '{print $NF}')
+        REQUIREMENTS_FILE="${RUNDIR}/collections/requirements.yml"
+
     else
         PROJECT="Current directory"
         RUNDIR="$PWD"
@@ -192,7 +202,12 @@ function install_ansible() {
 
 function install_deps() {
     echo "Installing collections from Ansible Galaxy"
-    ansible-galaxy collection install --pre -r collections/requirements.yml
+    echo "wtf $RUNDIR"
+    if [ -f $REQUIREMENTS_FILE ];
+    then
+        echo "Collection sourced from ${REQUIREMENTS_FILE}"
+        ansible-galaxy collection install --pre -r "${REQUIREMENTS_FILE}"
+    fi
 }
 
 function install_ansible_and_deps() {
